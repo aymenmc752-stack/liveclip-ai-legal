@@ -27,17 +27,104 @@ for p in (DATA, OUTPUT, UPLOADS): p.mkdir(parents=True, exist_ok=True)
 DB = DATA / 'liveclip.db'
 LOCK = threading.Lock()
 
+# PostgreSQL is used on Render when DATABASE_URL is configured. SQLite remains
+# the zero-configuration option for local development.
+DATABASE_URL = os.getenv('DATABASE_URL', '').strip()
+_USE_POSTGRES = bool(DATABASE_URL)
+
+
+class _Row(dict):
+    """Dictionary-like row that also preserves SQLite-style numeric indexing."""
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+class _Cursor:
+    def __init__(self, cursor, lastrowid=None):
+        self._cursor = cursor
+        self.lastrowid = lastrowid
+        self.rowcount = cursor.rowcount
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        return _Row(row) if row is not None and isinstance(row, dict) else row
+
+    def fetchall(self):
+        return [_Row(row) if isinstance(row, dict) else row for row in self._cursor.fetchall()]
+
+
+class _PostgresConnection:
+    def __init__(self, conn):
+        self._conn = conn
+
+    @staticmethod
+    def _sql(sql):
+        sql = sql.replace('INSERT OR IGNORE INTO', 'INSERT INTO')
+        sql = sql.replace('date(publish_at)=date(?)', 'publish_at::date=(%s)::date')
+        # All app placeholders are positional question marks, none appear in SQL strings.
+        sql = sql.replace('?', '%s')
+        if 'INSERT OR IGNORE' not in sql and 'INSERT INTO watchlist_settings' in sql:
+            sql += ' ON CONFLICT (id) DO NOTHING'
+        return sql
+
+    def execute(self, sql, params=()):
+        import re
+        from psycopg.rows import dict_row
+        raw_sql = sql
+        pg_sql = self._sql(sql)
+        wants_id = bool(re.match(r'\s*INSERT\s+INTO\s+(scheduled_posts|watchlist)\b', raw_sql, re.I)) and 'RETURNING' not in pg_sql.upper()
+        if wants_id:
+            pg_sql += ' RETURNING id'
+        cur = self._conn.cursor(row_factory=dict_row)
+        cur.execute(pg_sql, params)
+        lastrowid = None
+        if wants_id:
+            row = cur.fetchone()
+            if row:
+                lastrowid = row['id']
+        return _Cursor(cur, lastrowid)
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
+
 
 def db():
-    conn = sqlite3.connect(DB, timeout=30); conn.row_factory = sqlite3.Row
+    if _USE_POSTGRES:
+        import psycopg
+        from psycopg.rows import dict_row
+        raw = psycopg.connect(DATABASE_URL, connect_timeout=10, row_factory=dict_row)
+        conn = _PostgresConnection(raw)
+        statements = [
+            """CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, source_url TEXT, source_type TEXT, duration INTEGER, style TEXT, captions INTEGER, clips INTEGER DEFAULT 10, status TEXT, progress INTEGER DEFAULT 0, message TEXT, created_at TEXT, result_json TEXT, error TEXT, watermark INTEGER DEFAULT 0, resolution TEXT DEFAULT '1080x1920')""",
+            """CREATE TABLE IF NOT EXISTS schedule (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER, days_json TEXT, time_local TEXT, timezone TEXT, youtube INTEGER, tiktok INTEGER, updated_at TEXT)""",
+            """CREATE TABLE IF NOT EXISTS scheduled_posts (id BIGSERIAL PRIMARY KEY, job_id TEXT NOT NULL, clip_name TEXT NOT NULL, platform TEXT NOT NULL, title TEXT NOT NULL, description TEXT DEFAULT '', privacy_level TEXT DEFAULT 'SELF_ONLY', publish_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, result_json TEXT, error TEXT)""",
+            """CREATE INDEX IF NOT EXISTS idx_scheduled_posts_due ON scheduled_posts(status, publish_at)""",
+            """CREATE TABLE IF NOT EXISTS watchlist (id BIGSERIAL PRIMARY KEY, url TEXT NOT NULL UNIQUE, platform TEXT NOT NULL, label TEXT NOT NULL, authorized INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, last_checked TEXT, last_video_id TEXT, status TEXT DEFAULT 'Added', error TEXT, created_at TEXT NOT NULL)""",
+            """CREATE TABLE IF NOT EXISTS watchlist_seen (video_id TEXT PRIMARY KEY, watchlist_id BIGINT NOT NULL, job_id TEXT, seen_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', error TEXT)""",
+            """CREATE TABLE IF NOT EXISTS watchlist_settings (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 0, platform TEXT NOT NULL DEFAULT 'youtube', daily_time TEXT NOT NULL DEFAULT '18:00', timezone TEXT NOT NULL DEFAULT 'Africa/Algiers', resolution TEXT NOT NULL DEFAULT '1080x1920', watermark INTEGER NOT NULL DEFAULT 1, updated_at TEXT)""",
+            """CREATE TABLE IF NOT EXISTS oauth_states (state TEXT PRIMARY KEY, platform TEXT NOT NULL, redirect_uri TEXT NOT NULL, expires_at DOUBLE PRECISION NOT NULL, code_verifier TEXT)""",
+        ]
+        try:
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute("INSERT INTO watchlist_settings (id,enabled,platform,daily_time,timezone,resolution,watermark,updated_at) VALUES (1,0,'youtube','18:00','Africa/Algiers','1080x1920',1,'') ON CONFLICT (id) DO NOTHING")
+            conn.commit()
+            return conn
+        except Exception:
+            conn.close()
+            raise
+    conn = sqlite3.connect(DB, timeout=30)
+    conn.row_factory = sqlite3.Row
     conn.execute('''CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, source_url TEXT, source_type TEXT, duration INTEGER, style TEXT, captions INTEGER, clips INTEGER DEFAULT 10, status TEXT, progress INTEGER DEFAULT 0, message TEXT, created_at TEXT, result_json TEXT, error TEXT)''')
     columns = {row[1] for row in conn.execute('PRAGMA table_info(jobs)').fetchall()}
-    if 'clips' not in columns:
-        conn.execute('ALTER TABLE jobs ADD COLUMN clips INTEGER DEFAULT 10')
-    if 'watermark' not in columns:
-        conn.execute('ALTER TABLE jobs ADD COLUMN watermark INTEGER DEFAULT 0')
-    if 'resolution' not in columns:
-        conn.execute("ALTER TABLE jobs ADD COLUMN resolution TEXT DEFAULT '1080x1920'")
+    if 'clips' not in columns: conn.execute('ALTER TABLE jobs ADD COLUMN clips INTEGER DEFAULT 10')
+    if 'watermark' not in columns: conn.execute('ALTER TABLE jobs ADD COLUMN watermark INTEGER DEFAULT 0')
+    if 'resolution' not in columns: conn.execute("ALTER TABLE jobs ADD COLUMN resolution TEXT DEFAULT '1080x1920'")
     conn.execute('''CREATE TABLE IF NOT EXISTS schedule (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER, days_json TEXT, time_local TEXT, timezone TEXT, youtube INTEGER, tiktok INTEGER, updated_at TEXT)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS scheduled_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, clip_name TEXT NOT NULL, platform TEXT NOT NULL, title TEXT NOT NULL, description TEXT DEFAULT '', privacy_level TEXT DEFAULT 'SELF_ONLY', publish_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, result_json TEXT, error TEXT)''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_scheduled_posts_due ON scheduled_posts(status, publish_at)')
@@ -45,11 +132,8 @@ def db():
     conn.execute('''CREATE TABLE IF NOT EXISTS watchlist_seen (video_id TEXT PRIMARY KEY, watchlist_id INTEGER NOT NULL, job_id TEXT, seen_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', error TEXT)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS watchlist_settings (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 0, platform TEXT NOT NULL DEFAULT 'youtube', daily_time TEXT NOT NULL DEFAULT '18:00', timezone TEXT NOT NULL DEFAULT 'Africa/Algiers', resolution TEXT NOT NULL DEFAULT '1080x1920', watermark INTEGER NOT NULL DEFAULT 1, updated_at TEXT)''')
     conn.execute("INSERT OR IGNORE INTO watchlist_settings (id,enabled,platform,daily_time,timezone,resolution,watermark,updated_at) VALUES (1,0,'youtube','18:00','Africa/Algiers','1080x1920',1,'')")
-    conn.execute('''CREATE TABLE IF NOT EXISTS watchlist (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL UNIQUE, platform TEXT NOT NULL, label TEXT NOT NULL, authorized INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, last_checked TEXT, last_video_id TEXT, status TEXT DEFAULT 'Added', error TEXT, created_at TEXT NOT NULL)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS watchlist_seen (video_id TEXT PRIMARY KEY, watchlist_id INTEGER NOT NULL, job_id TEXT, seen_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', error TEXT)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS watchlist_settings (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 0, platform TEXT NOT NULL DEFAULT 'youtube', daily_time TEXT NOT NULL DEFAULT '18:00', timezone TEXT NOT NULL DEFAULT 'Africa/Algiers', resolution TEXT NOT NULL DEFAULT '1080x1920', watermark INTEGER NOT NULL DEFAULT 1, updated_at TEXT)''')
-    conn.execute("INSERT OR IGNORE INTO watchlist_settings (id,enabled,platform,daily_time,timezone,resolution,watermark,updated_at) VALUES (1,0,'youtube','18:00','Africa/Algiers','1080x1920',1,'')")
-    conn.commit(); return conn
+    conn.commit()
+    return conn
 
 
 def update_job(job_id: str, **fields):
