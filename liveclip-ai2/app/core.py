@@ -167,7 +167,23 @@ def download_url(url: str, job_id: str) -> Path:
     # yt-dlp may update its cookie jar after loading it. Render Secret Files are read-only,
     # so copy the secret to a temporary writable file and give yt-dlp that copy.
     writable_cookies_file = None
-    if cookies_file and os.path.isfile(cookies_file):
+    if cookies_file:
+        if not os.path.isfile(cookies_file):
+            raise RuntimeError(
+                'YOUTUBE_COOKIES_FILE is configured, but the file is missing at the configured path. '
+                'Check the Render Secret File filename and mount path.'
+            )
+        # Validate the Netscape cookie-file structure without logging cookie values.
+        with open(cookies_file, 'r', encoding='utf-8', errors='replace') as cookie_stream:
+            cookie_rows = sum(
+                1 for line in cookie_stream
+                if line.strip() and not line.lstrip().startswith('#') and line.count('\\t') >= 6
+            )
+        if cookie_rows == 0:
+            raise RuntimeError(
+                'The configured YouTube cookie file contains no recognizable Netscape-format cookie rows. '
+                'Re-export cookies in Netscape format; do not paste cookie contents into logs or chat.'
+            )
         writable_cookies_file = Path('/tmp') / f'liveclip-youtube-cookies-{job_id}.txt'
         shutil.copyfile(cookies_file, writable_cookies_file)
         opts['cookiefile'] = str(writable_cookies_file)
