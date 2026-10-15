@@ -439,7 +439,25 @@ def _watchlist_poll_once():
     for item in rows:
         try:
             opts={'quiet':True,'no_warnings':True,'extract_flat':'in_playlist','playlistend':5,'skip_download':True,'ignoreerrors':True,'socket_timeout':15}
-            with yt_dlp.YoutubeDL(opts) as ydl: info=ydl.extract_info(item['url'],download=False)
+            # Monitoring must use the same private YouTube cookies as downloads;
+            # previously this path ignored YOUTUBE_COOKIES_FILE entirely.
+            cookies_file=os.getenv('YOUTUBE_COOKIES_FILE','').strip().strip('"')
+            writable_cookies_file=None
+            if cookies_file:
+                if not os.path.isfile(cookies_file):
+                    raise RuntimeError('YOUTUBE_COOKIES_FILE is configured, but the file is missing at the configured path. Check the Render Secret File mount path.')
+                with open(cookies_file,'r',encoding='utf-8',errors='replace') as cookie_stream:
+                    cookie_rows=sum(1 for line in cookie_stream if line.strip() and not line.lstrip().startswith('#') and line.count('\\t') >= 6)
+                if cookie_rows == 0:
+                    raise RuntimeError('The configured YouTube cookie file contains no recognizable Netscape-format cookie rows. Re-export cookies in Netscape format.')
+                writable_cookies_file=Path('/tmp') / f'liveclip-watchlist-cookies-{item["id"]}.txt'
+                shutil.copyfile(cookies_file,writable_cookies_file)
+                opts['cookiefile']=str(writable_cookies_file)
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl: info=ydl.extract_info(item['url'],download=False)
+            finally:
+                if writable_cookies_file is not None:
+                    writable_cookies_file.unlink(missing_ok=True)
             entries=(info or {}).get('entries') or []
             # Entries are newest-first for channel videos/replays; skip active livestream entries.
             candidates=[]
