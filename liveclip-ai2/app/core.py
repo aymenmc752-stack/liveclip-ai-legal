@@ -426,7 +426,7 @@ def make_srt(transcript, start, end, output):
     output.write_text('\n'.join(lines),encoding='utf-8')
 
 
-def render_clip(source: Path, candidate: dict, transcript: list, job_id: str, index: int, captions: bool, meta: dict, watermark: bool = False, resolution: str = '1080x1920'):
+def render_clip(source: Path, candidate: dict, transcript: list, job_id: str, index: int, captions: bool, meta: dict, watermark: bool = False, resolution: str = '1080x1920', total_clips: int = 1):
     start=float(candidate['start']); end=float(candidate['end']); duration=end-start
     outdir=OUTPUT/job_id; outdir.mkdir(parents=True,exist_ok=True)
     out=outdir/f'clip_{index:02}.mp4'; srt=outdir/f'clip_{index:02}.srt'
@@ -442,7 +442,52 @@ def render_clip(source: Path, candidate: dict, transcript: list, job_id: str, in
     if watermark:
         # A subtle text watermark, burned into every rendered frame.
         vf += ",drawtext=text='TizShort':fontcolor=white@0.82:fontsize=42:borderw=3:bordercolor=black@0.65:x=w-tw-42:y=h-th-70"
-    run(['ffmpeg','-y','-ss',str(start),'-i',str(source),'-t',str(duration),'-vf',vf,'-c:v','libx264','-preset','ultrafast','-crf','24','-c:a','aac','-b:a','128k','-movflags','+faststart',str(out)],timeout=60*20)
+    # Stream FFmpeg progress so the UI doesn't appear frozen at 45% while a clip renders.
+    cmd = ['ffmpeg','-y','-ss',str(start),'-i',str(source),'-t',str(duration),'-vf',vf,
+           '-c:v','libx264','-preset','ultrafast','-crf','24','-c:a','aac','-b:a','128k',
+           '-movflags','+faststart','-progress','pipe:1','-stats_period','1','-nostats',str(out)]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    tail = []
+    deadline = time.monotonic() + 60*20
+    try:
+        while True:
+            check_cancelled(job_id)
+            if time.monotonic() > deadline:
+                proc.kill()
+                raise TimeoutError('FFmpeg rendering exceeded the 20-minute limit.')
+            line = proc.stdout.readline() if proc.stdout else ''
+            if not line:
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+                continue
+            line = line.strip()
+            if line:
+                tail.append(line)
+                tail = tail[-20:]
+            if line.startswith('out_time='):
+                try:
+                    clock = line.split('=', 1)[1]
+                    hh, mm, ss = clock.split(':')
+                    rendered_seconds = int(hh) * 3600 + int(mm) * 60 + float(ss)
+                    fraction = min(1.0, max(0.0, rendered_seconds / max(duration, 0.1)))
+                    overall = 45 + 45 * ((index - 1 + fraction) / max(total_clips, 1))
+                    update_job(job_id, progress=min(89, int(overall)),
+                               message=f'Rendering clip {index} of {total_clips}… {int(fraction * 100)}%')
+                except (ValueError, ZeroDivisionError):
+                    pass
+        return_code = proc.wait(timeout=5)
+        if return_code != 0:
+            detail = '\\n'.join(tail)[-2500:]
+            raise RuntimeError(f'FFmpeg render failed (exit {return_code}). {detail}')
+    except Exception:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        raise
+    finally:
+        if proc.stdout:
+            proc.stdout.close()
     return {'file':str(out.relative_to(ROOT)),'url':f'/output/{job_id}/{out.name}','duration':round(duration,1),'start':round(start,1),'end':round(end,1),'score':candidate['score'],'reason':candidate['reason'],'transcript':candidate.get('transcript','')[:300], 'resolution':f'{width}x{height}'}
 
 
@@ -515,7 +560,7 @@ def process_job(job_id: str, source_path: Path | None = None):
         for i,c in enumerate(candidates,1):
             check_cancelled(job_id)
             update_job(job_id,progress=45+int(45*(i-1)/len(candidates)),message=f'Rendering clip {i} of {len(candidates)}…')
-            rendered = render_clip(source_path,c,transcript,job_id,i,bool(job['captions']),info,bool(job.get('watermark', 0)), job.get('resolution', '1080x1920'))
+            rendered = render_clip(source_path,c,transcript,job_id,i,bool(job['captions']),info,bool(job.get('watermark', 0)), job.get('resolution', '1080x1920'), total_clips=len(candidates))
             clip_words = [seg.get('text', '') for seg in transcript if seg.get('end', 0) > c['start'] and seg.get('start', 0) < c['end']]
             title_source = ' '.join(clip_words).strip() or c.get('transcript', '')
             rendered['title'] = generate_clip_title(title_source, job.get('style', 'Funny moments'))
