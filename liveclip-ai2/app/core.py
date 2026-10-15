@@ -18,7 +18,11 @@ if os.name == 'nt':
         os.environ['DENO_PATH'] = str(_default_deno)
     _tool_dirs = [str(_default_ffmpeg_dir), str(_default_deno.parent)]
     os.environ['PATH'] = os.pathsep.join(_tool_dirs + [os.environ.get('PATH', '')])
-DATA = ROOT / 'data'; OUTPUT = ROOT / 'output'; UPLOADS = DATA / 'uploads'
+# Render's persistent disk should be mounted at /var/data and configured with
+# LIVECLIP_DATA_DIR=/var/data. Keep the existing local default for development.
+DATA = Path(os.getenv('LIVECLIP_DATA_DIR', str(ROOT / 'data'))).expanduser().resolve()
+OUTPUT = Path(os.getenv('LIVECLIP_OUTPUT_DIR', str(ROOT / 'output'))).expanduser().resolve()
+UPLOADS = DATA / 'uploads'
 for p in (DATA, OUTPUT, UPLOADS): p.mkdir(parents=True, exist_ok=True)
 DB = DATA / 'liveclip.db'
 LOCK = threading.Lock()
