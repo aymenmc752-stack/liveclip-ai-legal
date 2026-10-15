@@ -447,7 +447,7 @@ def _watchlist_poll_once():
                 if not os.path.isfile(cookies_file):
                     raise RuntimeError('YOUTUBE_COOKIES_FILE is configured, but the file is missing at the configured path. Check the Render Secret File mount path.')
                 with open(cookies_file,'r',encoding='utf-8',errors='replace') as cookie_stream:
-                    cookie_rows=sum(1 for line in cookie_stream if line.strip() and not line.lstrip().startswith('#') and line.count('\\t') >= 6)
+                    cookie_rows=sum(1 for line in cookie_stream if line.strip() and not line.lstrip().startswith('#') and line.count('\t') >= 6)
                 if cookie_rows == 0:
                     raise RuntimeError('The configured YouTube cookie file contains no recognizable Netscape-format cookie rows. Re-export cookies in Netscape format.')
                 writable_cookies_file=Path('/tmp') / f'liveclip-watchlist-cookies-{item["id"]}.txt'
