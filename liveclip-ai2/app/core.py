@@ -129,6 +129,9 @@ def download_url(url: str, job_id: str) -> Path:
     template = str(dest / 'source.%(ext)s')
     deno = os.getenv('DENO_PATH', '').strip().strip('"') or shutil.which('deno')
     ffmpeg_dir = str(Path(tool_path('FFMPEG_PATH', 'ffmpeg')).parent)
+    # Optional YouTube cookies for hosted environments that receive sign-in/bot challenges.
+    # Configure YOUTUBE_COOKIES_FILE to a private mounted secret-file path; never commit cookies.
+    cookies_file = os.getenv('YOUTUBE_COOKIES_FILE', '').strip().strip('"')
 
     def progress_hook(data):
         check_cancelled(job_id)
@@ -159,6 +162,8 @@ def download_url(url: str, job_id: str) -> Path:
     }
     if deno and os.path.isfile(deno):
         opts['js_runtimes'] = {'deno': {'path': deno}}
+    if cookies_file and os.path.isfile(cookies_file):
+        opts['cookiefile'] = cookies_file
     try:
         import yt_dlp
         with yt_dlp.YoutubeDL(opts) as ydl:
