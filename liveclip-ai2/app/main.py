@@ -473,7 +473,95 @@ def youtube_oauth_start():
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url)
 
+
 @app.get('/oauth/youtube/callback')
+def youtube_oauth_callback(code: str, state: str):
+    from google_auth_oauthlib.flow import Flow
+    from fastapi.responses import RedirectResponse
+
+    item = _consume_oauth_state(state, 'youtube')
+    if not item:
+        raise HTTPException(
+            400,
+            'OAuth state expired. Please try connecting again.'
+        )
+
+    secrets_file = os.getenv(
+        'YOUTUBE_CLIENT_SECRETS_FILE', ''
+    ).strip()
+
+    if not secrets_file:
+        raise HTTPException(
+            400,
+            'Set YOUTUBE_CLIENT_SECRETS_FILE in your environment.'
+        )
+
+    path = Path(secrets_file)
+    if not path.is_absolute():
+        path = ROOT / path
+
+    if not path.exists():
+        raise HTTPException(
+            400,
+            f'YouTube OAuth JSON file not found: {path}'
+        )
+
+    redirect = item['redirect_uri']
+
+    flow = Flow.from_client_secrets_file(
+        str(path),
+        scopes=['https://www.googleapis.com/auth/youtube.upload'],
+        redirect_uri=redirect
+    )
+
+    try:
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+
+        token_path = ROOT / 'data' / 'youtube-token.json'
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(
+            json.dumps(
+                {'credentials': json.loads(creds.to_json())},
+                indent=2
+            ),
+            encoding='utf-8'
+        )
+    except Exception as e:
+        raise HTTPException(
+            400,
+            f'YouTube OAuth failed: {e}'
+        )
+
+    return RedirectResponse('/#connections?youtube=connected')
+
+
+@app.get('/oauth/tiktok/callback')
+def tiktok_oauth_callback(code: str, state: str):
+    from fastapi.responses import RedirectResponse
+
+    item = _consume_oauth_state(state, 'tiktok')
+    if not item:
+        raise HTTPException(
+            400,
+            'OAuth state expired. Please try connecting again.'
+        )
+
+    try:
+        publishing.exchange_tiktok_code(
+            code,
+            item['redirect_uri']
+        )
+    except Exception as e:
+        raise HTTPException(
+            400,
+            f'TikTok OAuth failed: {e}'
+        )
+
+    return RedirectResponse('/#connections?tiktok=connected')
+
+
+
 def youtube_oauth_callback(code: str, state: str):
     
 item = _consume_oauth_state(state, 'youtube')
