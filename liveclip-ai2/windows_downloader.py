@@ -23,9 +23,11 @@ def download(url: str, folder: Path) -> Path:
     command = [
         sys.executable, "-m", "yt_dlp",
         "--no-playlist", "--no-warnings", "--quiet",
-        # Prefer a combined stream, but fall back to any available combined format.
-        # Some Shorts expose formats that do not match the height/audio filters.
-        "--format", "best[height<=720][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]/best",
+        # YouTube may expose video/audio separately or require JS challenge solving.
+        # Deno runs yt-dlp's YouTube JavaScript challenge solver; EJS is fetched if needed.
+        "--js-runtimes", "deno",
+        "--remote-components", "ejs:github",
+        "--format", "bv*+ba/b",
         "--limit-rate", MAX_RATE,
         "--retries", "3", "--extractor-retries", "3",
         "--output", str(output), url,
