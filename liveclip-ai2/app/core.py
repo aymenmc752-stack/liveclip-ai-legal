@@ -61,6 +61,7 @@ class _PostgresConnection:
 
     @staticmethod
     def _sql(sql):
+        raw_sql = sql
         sql = sql.replace('INSERT OR IGNORE INTO', 'INSERT INTO')
         sql = sql.replace('date(publish_at)=date(?)', 'publish_at::timestamptz::date=(%s)::timestamptz::date')
         # All app placeholders are positional question marks, none appear in SQL strings.
