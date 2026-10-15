@@ -156,6 +156,52 @@ def health():
     ffprobe = tool_path('FFPROBE_PATH', 'ffprobe')
     return {'ok':True,'ffmpeg':Path(ffmpeg).exists() if os.path.isabs(ffmpeg) else shutil.which(ffmpeg) is not None,'ffprobe':Path(ffprobe).exists() if os.path.isabs(ffprobe) else shutil.which(ffprobe) is not None,'yt_dlp':ytdlp_ok,'deno':bool(os.getenv('DENO_PATH') and Path(os.getenv('DENO_PATH').strip().strip('\"')).exists()) or shutil.which('deno') is not None,'whisper':'optional: installed on first processing run if dependencies are present','note':'Background scheduled-post worker checks due posts every 20 seconds while this server process is running. The host must remain online and persistent storage is required.'}
 
+
+def _local_downloader_authorized(authorization: str):
+    token=os.getenv('LOCAL_DOWNLOADER_TOKEN','').strip()
+    if not token:
+        raise HTTPException(503,'Local downloader is not configured on the server.')
+    supplied=authorization.removeprefix('Bearer ').strip() if authorization.startswith('Bearer ') else ''
+    if not supplied or not hmac.compare_digest(supplied,token):
+        raise HTTPException(401,'Invalid local downloader token.')
+
+@app.get('/api/local-downloader/next')
+def local_downloader_next(authorization: str = ''):
+    _local_downloader_authorized(authorization)
+    conn=db()
+    row=conn.execute("SELECT id,source_url FROM jobs WHERE status='queued' AND source_type IN ('youtube','twitch') ORDER BY created_at ASC LIMIT 1").fetchone()
+    if not row:
+        conn.close()
+        return {'job':None}
+    changed=conn.execute("UPDATE jobs SET status='downloading',progress=3,message='Waiting for local downloader…' WHERE id=? AND status='queued'",(row['id'],)).rowcount
+    conn.commit(); conn.close()
+    if not changed: return {'job':None}
+    return {'job':{'id':row['id'],'url':row['source_url']}}
+
+@app.post('/api/local-downloader/{job_id}/upload',status_code=202)
+def local_downloader_upload(job_id: str, background: BackgroundTasks, authorization: str = '', file: UploadFile = File(...)):
+    _local_downloader_authorized(authorization)
+    job=get_job(job_id)
+    if not job: raise HTTPException(404,'Job not found.')
+    if job['status']!='downloading': raise HTTPException(409,'This job is not waiting for a local download.')
+    ext=Path(file.filename or 'source.mp4').suffix.lower()
+    if ext not in {'.mp4','.mkv','.webm','.mov','.m4v'}: raise HTTPException(400,'Unsupported downloaded video format.')
+    target_dir=UPLOADS/job_id; target_dir.mkdir(parents=True,exist_ok=True)
+    target=target_dir/('source'+ext); size=0
+    with target.open('wb') as out:
+        while True:
+            chunk=file.file.read(1024*1024)
+            if not chunk: break
+            size+=len(chunk)
+            if size>8*1024*1024*1024:
+                target.unlink(missing_ok=True); raise HTTPException(413,'Source exceeds the 8 GB limit.')
+            out.write(chunk)
+    if size==0:
+        target.unlink(missing_ok=True); raise HTTPException(400,'Uploaded source file is empty.')
+    update_job(job_id,status='processing',progress=12,message='Source downloaded. Starting cloud clipping…')
+    background.add_task(process_job,job_id,target)
+    return {'id':job_id,'status':'processing','message':'Source received; clipping continues on the server.'}
+
 @app.get('/api/jobs')
 def jobs(): return list_jobs()
 
@@ -215,6 +261,8 @@ def create_from_url(body: UrlJob, background: BackgroundTasks):
     if not valid_url(body.url): raise HTTPException(400,'Use a valid YouTube or Twitch URL.')
     host=body.url.lower(); source='twitch' if 'twitch.tv' in host else 'youtube'
     jid=create_job(body.url,source,body.duration,body.style,body.captions,body.clips,body.watermark,body.resolution)
+    if os.getenv('LOCAL_DOWNLOADER_TOKEN','').strip():
+        return {'id':jid,'status':'queued','message':'Waiting for your low-CPU Windows downloader; clipping will run on the server.'}
     background.add_task(process_job,jid)
     return {'id':jid,'status':'queued','message':'Job accepted. Processing runs in the server process.'}
 
