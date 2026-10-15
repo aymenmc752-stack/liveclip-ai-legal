@@ -65,7 +65,7 @@ class _PostgresConnection:
         sql = sql.replace('date(publish_at)=date(?)', 'publish_at::timestamptz::date=(%s)::timestamptz::date')
         # All app placeholders are positional question marks, none appear in SQL strings.
         sql = sql.replace('?', '%s')
-        if 'INSERT OR IGNORE' not in sql and 'INSERT INTO watchlist_settings' in sql:
+        if 'INSERT OR IGNORE' in raw_sql.upper() and 'watchlist_settings' in raw_sql:
             sql += ' ON CONFLICT (id) DO NOTHING'
         return sql
 
