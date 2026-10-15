@@ -255,6 +255,8 @@ def retry_job(job_id: str, background: BackgroundTasks):
     if j['status'] not in ('failed', 'cancelled'):
         raise HTTPException(409, 'Only failed or cancelled jobs can be retried.')
     jid=create_job(j['source_url'], j['source_type'], j['duration'], j['style'], bool(j['captions']), int(j.get('clips') or 10), bool(j.get('watermark', 0)), j.get('resolution', '1080x1920'))
+    if os.getenv('LOCAL_DOWNLOADER_TOKEN','').strip():
+        return {'id': jid, 'status': 'queued', 'message': 'Retry queued for your local downloader.'}
     background.add_task(process_job, jid)
     return {'id': jid, 'status': 'queued', 'message': 'Retry queued as a new job.'}
 
