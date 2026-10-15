@@ -434,7 +434,12 @@ def render_clip(source: Path, candidate: dict, transcript: list, job_id: str, in
     # All supported output sizes are exact 9:16. Scale-to-fill + center crop avoids bars;
     # it is a center crop rather than AI speaker tracking.
     dimensions = {'720x1280': (720,1280), '1080x1920': (1080,1920), '1440x2560': (1440,2560), '2160x3840': (2160,3840)}
-    width,height = dimensions.get(resolution, dimensions['1080x1920'])
+    width,height = dimensions.get(resolution, dimensions['720x1280'])
+    # Render's free instance has only 512 MB RAM. Keep cloud rendering at 720p
+    # unless the operator explicitly opts into higher-memory rendering.
+    on_render = bool(os.getenv('RENDER') or os.getenv('RENDER_SERVICE_ID'))
+    if on_render and os.getenv('LIVECLIP_ALLOW_HD_RENDER', '').strip() != '1' and height > 1280:
+        width,height = 720,1280
     vf=f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1,fps=30"
     if captions and transcript:
         escaped=str(srt.resolve()).replace('\\','/').replace(':','\\:').replace("'","\\'")
@@ -443,9 +448,11 @@ def render_clip(source: Path, candidate: dict, transcript: list, job_id: str, in
         # A subtle text watermark, burned into every rendered frame.
         vf += ",drawtext=text='TizShort':fontcolor=white@0.82:fontsize=42:borderw=3:bordercolor=black@0.65:x=w-tw-42:y=h-th-70"
     # Stream FFmpeg progress so the UI doesn't appear frozen at 45% while a clip renders.
-    cmd = ['ffmpeg','-y','-ss',str(start),'-i',str(source),'-t',str(duration),'-vf',vf,
-           '-c:v','libx264','-preset','ultrafast','-crf','24','-c:a','aac','-b:a','128k',
-           '-movflags','+faststart','-progress','pipe:1','-stats_period','1','-nostats',str(out)]
+    cmd = ['ffmpeg','-y','-threads','1','-filter_threads','1','-filter_complex_threads','1',
+           '-ss',str(start),'-i',str(source),'-t',str(duration),'-vf',vf,
+           '-c:v','libx264','-threads','1','-preset','ultrafast','-crf','26',
+           '-c:a','aac','-b:a','96k','-movflags','+faststart',
+           '-progress','pipe:1','-stats_period','1','-nostats',str(out)]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     tail = []
     deadline = time.monotonic() + 60*20
