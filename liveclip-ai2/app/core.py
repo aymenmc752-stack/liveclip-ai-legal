@@ -177,7 +177,7 @@ def download_url(url: str, job_id: str) -> Path:
         with open(cookies_file, 'r', encoding='utf-8', errors='replace') as cookie_stream:
             cookie_rows = sum(
                 1 for line in cookie_stream
-                if line.strip() and not line.lstrip().startswith('#') and line.count('\\t') >= 6
+                if line.strip() and not line.lstrip().startswith('#') and line.count('\t') >= 6
             )
         if cookie_rows == 0:
             raise RuntimeError(
