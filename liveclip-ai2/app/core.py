@@ -160,7 +160,14 @@ def download_url(url: str, job_id: str) -> Path:
         'progress_hooks': [progress_hook],
         'continuedl': True,
         # Avoid YouTube's currently broken tv_downgraded client when cookies are enabled.
-        'extractor_args': {'youtube': {'player_client': ['android']}},
+        # Let the current yt-dlp release choose compatible YouTube clients; forcing one
+        # client has alternated between bot challenges and missing-format errors.
+        'sleep_interval_requests': 1,
+        'sleep_interval': 2,
+        'max_sleep_interval': 5,
+        'retries': 3,
+        'extractor_retries': 3,
+        'force_ipv4': True,
     }
     if deno and os.path.isfile(deno):
         opts['js_runtimes'] = {'deno': {'path': deno}}
