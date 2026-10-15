@@ -162,8 +162,13 @@ def download_url(url: str, job_id: str) -> Path:
     }
     if deno and os.path.isfile(deno):
         opts['js_runtimes'] = {'deno': {'path': deno}}
+    # yt-dlp may update its cookie jar after loading it. Render Secret Files are read-only,
+    # so copy the secret to a temporary writable file and give yt-dlp that copy.
+    writable_cookies_file = None
     if cookies_file and os.path.isfile(cookies_file):
-        opts['cookiefile'] = cookies_file
+        writable_cookies_file = Path('/tmp') / f'liveclip-youtube-cookies-{job_id}.txt'
+        shutil.copyfile(cookies_file, writable_cookies_file)
+        opts['cookiefile'] = str(writable_cookies_file)
     try:
         import yt_dlp
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -172,6 +177,9 @@ def download_url(url: str, job_id: str) -> Path:
         if cancel_requested(job_id):
             raise RuntimeError('Job cancelled by user.') from e
         raise RuntimeError(f'Video download failed: {type(e).__name__}: {e}') from e
+    finally:
+        if writable_cookies_file is not None:
+            writable_cookies_file.unlink(missing_ok=True)
 
     check_cancelled(job_id)
     candidates = [p for p in dest.iterdir() if p.is_file() and p.suffix.lower() in {'.mp4', '.mkv', '.webm', '.mov', '.m4v'} and not p.name.endswith('.part')]
