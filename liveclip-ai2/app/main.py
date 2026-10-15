@@ -35,7 +35,9 @@ async def optional_basic_auth(request, call_next):
     """Protect public deployments when APP_USERNAME and APP_PASSWORD are set."""
     username=os.getenv('APP_USERNAME','')
     password=os.getenv('APP_PASSWORD','')
-    if username and password and request.url.path != '/api/health':
+    # Local downloader routes use their own Bearer token, so don't intercept them with Basic auth.
+    is_local_downloader = request.url.path.startswith('/api/local-downloader/')
+    if username and password and request.url.path != '/api/health' and not is_local_downloader:
         header=request.headers.get('authorization','')
         supplied_user=supplied_pass=''
         if header.startswith('Basic '):
