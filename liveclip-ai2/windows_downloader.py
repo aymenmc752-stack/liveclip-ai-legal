@@ -46,10 +46,12 @@ def main():
         raise SystemExit("Set LIVECLIP_URL and LOCAL_DOWNLOADER_TOKEN first.")
     session = requests.Session()
     print("LiveClip low-CPU downloader running. One job at a time; Ctrl+C to stop.")
+    connection_backoff = 10
     while True:
         try:
             response = session.get(BASE_URL + "/api/local-downloader/next", headers=HEADERS, timeout=30)
             response.raise_for_status()
+            connection_backoff = 10
             job = response.json().get("job")
             if not job:
                 time.sleep(POLL_SECONDS)
@@ -76,8 +78,21 @@ def main():
             print("Downloader stopped.")
             return
         except Exception as exc:
-            print(f"Connection issue: {type(exc).__name__}: {exc}")
-            time.sleep(10)
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            retry_after = getattr(getattr(exc, "response", None), "headers", {}).get("Retry-After")
+            if status == 429:
+                wait = max(30, int(retry_after)) if retry_after and retry_after.isdigit() else max(30, connection_backoff)
+                connection_backoff = min(max(connection_backoff * 2, 30), 180)
+                print(f"Server rate-limited the downloader (429). Waiting {wait}s before retrying.")
+            elif status == 502 or status == 503 or status == 504:
+                wait = connection_backoff
+                connection_backoff = min(connection_backoff * 2, 180)
+                print(f"Server gateway issue ({status}). Waiting {wait}s before retrying.")
+            else:
+                wait = connection_backoff
+                connection_backoff = min(connection_backoff * 2, 180)
+                print(f"Connection issue: {type(exc).__name__}: {exc}. Retrying in {wait}s.")
+            time.sleep(wait)
 
 if __name__ == "__main__":
     main()
