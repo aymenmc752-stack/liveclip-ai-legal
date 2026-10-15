@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from urllib.parse import urlencode
 from . import publishing
-from .core import ROOT, DATA, OUTPUT, UPLOADS, db, update_job, get_job, list_jobs, process_job, probe, CANCEL_FLAGS, CANCEL_LOCK
+from .core import ROOT, DATA, OUTPUT, UPLOADS, db, update_job, get_job, list_jobs, process_job, probe, CANCEL_FLAGS, CANCEL_LOCK, _USE_POSTGRES
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
@@ -470,8 +470,12 @@ def _watchlist_loop():
 
 
 def _oauth_db():
+    # OAuth state shares the configured persistent database on Render.
+    if _USE_POSTGRES:
+        return db()
     DATA.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DATA / "oauth_states.sqlite", timeout=10)
+    conn.row_factory = sqlite3.Row
     conn.execute("""
         CREATE TABLE IF NOT EXISTS oauth_states (
             state TEXT PRIMARY KEY,
@@ -481,36 +485,26 @@ def _oauth_db():
             code_verifier TEXT
         )
     """)
-    # Upgrade an existing database created by the previous version.
-    columns = {
-        row[1] for row in
-        conn.execute("PRAGMA table_info(oauth_states)").fetchall()
-    }
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(oauth_states)").fetchall()}
     if "code_verifier" not in columns:
-        conn.execute(
-            "ALTER TABLE oauth_states ADD COLUMN code_verifier TEXT"
-        )
+        conn.execute("ALTER TABLE oauth_states ADD COLUMN code_verifier TEXT")
         conn.commit()
     return conn
 
 
-def _save_oauth_state(
-    state, platform, redirect_uri, code_verifier=None
-):
+def _save_oauth_state(state, platform, redirect_uri, code_verifier=None):
     conn = _oauth_db()
     try:
-        conn.execute(
-            "INSERT OR REPLACE INTO oauth_states "
-            "(state, platform, redirect_uri, expires_at, code_verifier) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                state,
-                platform,
-                redirect_uri,
-                time.time() + 600,
-                code_verifier
+        if _USE_POSTGRES:
+            conn.execute(
+                "INSERT INTO oauth_states (state,platform,redirect_uri,expires_at,code_verifier) VALUES (?,?,?,?,?) ON CONFLICT (state) DO UPDATE SET platform=EXCLUDED.platform, redirect_uri=EXCLUDED.redirect_uri, expires_at=EXCLUDED.expires_at, code_verifier=EXCLUDED.code_verifier",
+                (state, platform, redirect_uri, time.time() + 600, code_verifier)
             )
-        )
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO oauth_states (state,platform,redirect_uri,expires_at,code_verifier) VALUES (?,?,?,?,?)",
+                (state, platform, redirect_uri, time.time() + 600, code_verifier)
+            )
         conn.commit()
     finally:
         conn.close()
@@ -520,27 +514,16 @@ def _consume_oauth_state(state, platform):
     conn = _oauth_db()
     try:
         row = conn.execute(
-            "SELECT redirect_uri, expires_at, code_verifier "
-            "FROM oauth_states WHERE state=? AND platform=?",
+            "SELECT redirect_uri, expires_at, code_verifier FROM oauth_states WHERE state=? AND platform=?",
             (state, platform)
         ).fetchone()
-
-        conn.execute(
-            "DELETE FROM oauth_states WHERE state=? AND platform=?",
-            (state, platform)
-        )
+        conn.execute("DELETE FROM oauth_states WHERE state=? AND platform=?", (state, platform))
         conn.commit()
     finally:
         conn.close()
-
-    if not row or row[1] < time.time():
+    if not row or row["expires_at"] < time.time():
         return None
-
-    return {
-        "redirect_uri": row[0],
-        "code_verifier": row[2]
-    }
-
+    return {"redirect_uri": row["redirect_uri"], "code_verifier": row["code_verifier"]}
 
 @app.get('/oauth/youtube/start')
 def youtube_oauth_start():
