@@ -151,7 +151,7 @@ def download_url(url: str, job_id: str) -> Path:
     opts = {
         'noplaylist': True,
         'restrictfilenames': True,
-        'format': 'bv*[height<=720]+ba/b[height<=720]/b',
+        'format': 'best[height<=720]/best',
         'merge_output_format': 'mp4',
         'outtmpl': template,
         'ffmpeg_location': ffmpeg_dir,
