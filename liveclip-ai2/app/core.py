@@ -62,7 +62,7 @@ class _PostgresConnection:
     @staticmethod
     def _sql(sql):
         sql = sql.replace('INSERT OR IGNORE INTO', 'INSERT INTO')
-        sql = sql.replace('date(publish_at)=date(?)', 'publish_at::date=(%s)::date')
+        sql = sql.replace('date(publish_at)=date(?)', 'publish_at::timestamptz::date=(%s)::timestamptz::date')
         # All app placeholders are positional question marks, none appear in SQL strings.
         sql = sql.replace('?', '%s')
         if 'INSERT OR IGNORE' not in sql and 'INSERT INTO watchlist_settings' in sql:
