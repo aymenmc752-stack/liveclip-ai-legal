@@ -159,6 +159,8 @@ def download_url(url: str, job_id: str) -> Path:
         'no_warnings': True,
         'progress_hooks': [progress_hook],
         'continuedl': True,
+        # Avoid YouTube's currently broken tv_downgraded client when cookies are enabled.
+        'extractor_args': {'youtube': {'player_client': ['default', 'web_embedded']}},
     }
     if deno and os.path.isfile(deno):
         opts['js_runtimes'] = {'deno': {'path': deno}}
