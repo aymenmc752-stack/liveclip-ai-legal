@@ -2,7 +2,7 @@ from __future__ import annotations
 import json, os, re, shutil, uuid, threading, time, base64, hmac, sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from fastapi import FastAPI, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, BackgroundTasks, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -166,7 +166,7 @@ def _local_downloader_authorized(authorization: str):
         raise HTTPException(401,'Invalid local downloader token.')
 
 @app.get('/api/local-downloader/next')
-def local_downloader_next(authorization: str = ''):
+def local_downloader_next(authorization: str = Header(default='')):
     _local_downloader_authorized(authorization)
     conn=db()
     row=conn.execute("SELECT id,source_url FROM jobs WHERE status='queued' AND source_type IN ('youtube','twitch') ORDER BY created_at ASC LIMIT 1").fetchone()
@@ -179,7 +179,7 @@ def local_downloader_next(authorization: str = ''):
     return {'job':{'id':row['id'],'url':row['source_url']}}
 
 @app.post('/api/local-downloader/{job_id}/upload',status_code=202)
-def local_downloader_upload(job_id: str, background: BackgroundTasks, authorization: str = '', file: UploadFile = File(...)):
+def local_downloader_upload(job_id: str, background: BackgroundTasks, authorization: str = Header(default=''), file: UploadFile = File(...)):
     _local_downloader_authorized(authorization)
     job=get_job(job_id)
     if not job: raise HTTPException(404,'Job not found.')
