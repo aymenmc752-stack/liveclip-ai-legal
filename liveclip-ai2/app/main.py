@@ -126,16 +126,9 @@ def _scheduler_loop():
 @app.on_event('startup')
 def startup():
     global _scheduler_thread, _watchlist_thread
-    public_base=os.getenv('PUBLIC_BASE_URL','http://localhost:8000').lower()
-    # Do not crash the entire ASGI service during startup when optional public
-    # deployment credentials are missing. The auth middleware protects the app
-    # whenever APP_USERNAME and APP_PASSWORD are configured. Render deployments
-    # should configure both variables before exposing the service publicly.
-    if not any(host in public_base for host in ('localhost','127.0.0.1')) and not (os.getenv('APP_USERNAME') and os.getenv('APP_PASSWORD')):
-        import logging
-        logging.getLogger(__name__).error(
-            'APP_USERNAME/APP_PASSWORD are missing for public deployment; configure both in Render Environment.'
-        )
+    # Public deployment credentials are checked by middleware/configuration;
+    # do not abort ASGI startup here. A missing PUBLIC_BASE_URL must not make
+    # the application crash during deployment.
     db().close()
     if _scheduler_thread is None or not _scheduler_thread.is_alive():
         _scheduler_stop.clear()
