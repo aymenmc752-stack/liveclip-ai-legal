@@ -302,16 +302,31 @@ def download_url(url: str, job_id: str) -> Path:
     return max(candidates, key=lambda p: p.stat().st_size)
 
 
-def transcribe(path: Path):
+def transcribe(path: Path, job_id: str | None = None):
     try:
         from faster_whisper import WhisperModel
         model_name=os.getenv('WHISPER_MODEL','tiny')
+        if job_id:
+            update_job(job_id, progress=16, message=f'Loading Whisper {model_name} model (first run may download it)…')
         model=WhisperModel(model_name, device=os.getenv('WHISPER_DEVICE','cpu'), compute_type=os.getenv('WHISPER_COMPUTE_TYPE','int8'))
+        if job_id:
+            update_job(job_id, progress=18, message='Whisper model ready. Transcribing audio…')
         segments, info=model.transcribe(str(path), vad_filter=True, word_timestamps=False, beam_size=1)
         rows=[]
+        last_progress=18
         for s in segments:
             text=(s.text or '').strip()
             if text: rows.append({'start':float(s.start),'end':float(s.end),'text':text})
+            # faster-whisper yields segments as it processes audio. Reflect that work in
+            # the job status instead of leaving the UI frozen at 15% for long videos.
+            if job_id:
+                duration=float(getattr(info, 'duration', 0) or 0)
+                if duration > 0:
+                    progress=min(40, 18 + int(22 * min(float(s.end), duration) / duration))
+                    if progress > last_progress:
+                        update_job(job_id, progress=progress,
+                                   message=f'Transcribing speech… {min(100, int(100 * float(s.end) / duration))}% of audio analyzed')
+                        last_progress=progress
         return rows, None
     except Exception as e:
         return [], f'Transcription unavailable: {type(e).__name__}: {e}'
@@ -487,7 +502,7 @@ def process_job(job_id: str, source_path: Path | None = None):
         info=probe(source_path)
         if info['duration'] < 15: raise ValueError('Video must be at least 15 seconds long.')
         update_job(job_id,progress=15,message='Transcribing speech (first run may download a Whisper model)…')
-        transcript, transcribe_warning=transcribe(source_path)
+        transcript, transcribe_warning=transcribe(source_path, job_id)
         check_cancelled(job_id)
         update_job(job_id,progress=45,message='Analyzing audio peaks and ranking candidate moments…')
         peaks=audio_peaks(source_path,info['duration'])
