@@ -418,6 +418,7 @@ def _watchlist_loop():
 
 
 
+
 def _oauth_db():
     DATA.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DATA / "oauth_states.sqlite", timeout=10)
@@ -426,20 +427,39 @@ def _oauth_db():
             state TEXT PRIMARY KEY,
             platform TEXT NOT NULL,
             redirect_uri TEXT NOT NULL,
-            expires_at REAL NOT NULL
+            expires_at REAL NOT NULL,
+            code_verifier TEXT
         )
     """)
+    # Upgrade an existing database created by the previous version.
+    columns = {
+        row[1] for row in
+        conn.execute("PRAGMA table_info(oauth_states)").fetchall()
+    }
+    if "code_verifier" not in columns:
+        conn.execute(
+            "ALTER TABLE oauth_states ADD COLUMN code_verifier TEXT"
+        )
+        conn.commit()
     return conn
 
 
-def _save_oauth_state(state, platform, redirect_uri):
+def _save_oauth_state(
+    state, platform, redirect_uri, code_verifier=None
+):
     conn = _oauth_db()
     try:
         conn.execute(
             "INSERT OR REPLACE INTO oauth_states "
-            "(state, platform, redirect_uri, expires_at) "
-            "VALUES (?, ?, ?, ?)",
-            (state, platform, redirect_uri, time.time() + 600)
+            "(state, platform, redirect_uri, expires_at, code_verifier) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                state,
+                platform,
+                redirect_uri,
+                time.time() + 600,
+                code_verifier
+            )
         )
         conn.commit()
     finally:
@@ -450,14 +470,14 @@ def _consume_oauth_state(state, platform):
     conn = _oauth_db()
     try:
         row = conn.execute(
-            "SELECT redirect_uri, expires_at FROM oauth_states "
-            "WHERE state=? AND platform=?",
+            "SELECT redirect_uri, expires_at, code_verifier "
+            "FROM oauth_states WHERE state=? AND platform=?",
             (state, platform)
         ).fetchone()
 
         conn.execute(
-            "DELETE FROM oauth_states WHERE state=?",
-            (state,)
+            "DELETE FROM oauth_states WHERE state=? AND platform=?",
+            (state, platform)
         )
         conn.commit()
     finally:
@@ -466,7 +486,10 @@ def _consume_oauth_state(state, platform):
     if not row or row[1] < time.time():
         return None
 
-    return {"redirect_uri": row[0]}
+    return {
+        "redirect_uri": row[0],
+        "code_verifier": row[2]
+    }
 
 
 @app.get('/oauth/youtube/start')
@@ -495,14 +518,18 @@ def youtube_oauth_start():
         )
 
     redirect = (
-        os.getenv('PUBLIC_BASE_URL', 'http://localhost:8000').rstrip('/')
+        os.getenv(
+            'PUBLIC_BASE_URL',
+            'http://localhost:8000'
+        ).rstrip('/')
         + '/oauth/youtube/callback'
     )
 
     flow = Flow.from_client_secrets_file(
         str(path),
         scopes=['https://www.googleapis.com/auth/youtube.upload'],
-        redirect_uri=redirect
+        redirect_uri=redirect,
+        autogenerate_code_verifier=True
     )
 
     url, state = flow.authorization_url(
@@ -511,7 +538,13 @@ def youtube_oauth_start():
         prompt='consent'
     )
 
-    _save_oauth_state(state, 'youtube', redirect)
+    _save_oauth_state(
+        state,
+        'youtube',
+        redirect,
+        flow.code_verifier
+    )
+
     return RedirectResponse(url)
 
 
@@ -547,11 +580,21 @@ def youtube_oauth_callback(code: str, state: str):
             f'YouTube OAuth JSON file not found: {path}'
         )
 
+    verifier = item.get('code_verifier')
+    if not verifier:
+        raise HTTPException(
+            400,
+            'Missing saved OAuth code verifier. Please reconnect YouTube.'
+        )
+
     flow = Flow.from_client_secrets_file(
         str(path),
         scopes=['https://www.googleapis.com/auth/youtube.upload'],
-        redirect_uri=item['redirect_uri']
+        redirect_uri=item['redirect_uri'],
+        autogenerate_code_verifier=True
     )
+
+    flow.code_verifier = verifier
 
     try:
         flow.fetch_token(code=code)
@@ -573,7 +616,6 @@ def youtube_oauth_callback(code: str, state: str):
         )
 
     return RedirectResponse('/#connections?youtube=connected')
-
 
 @app.get('/oauth/tiktok/start')
 def tiktok_oauth_start():
