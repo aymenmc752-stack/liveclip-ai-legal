@@ -23,8 +23,9 @@ def download(url: str, folder: Path) -> Path:
     command = [
         sys.executable, "-m", "yt_dlp",
         "--no-playlist", "--no-warnings", "--quiet",
-        # Prefer a combined stream so the PC does not need to merge separate tracks.
-        "--format", "best[height<=720][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]",
+        # Prefer a combined stream, but fall back to any available combined format.
+        # Some Shorts expose formats that do not match the height/audio filters.
+        "--format", "best[height<=720][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]/best",
         "--limit-rate", MAX_RATE,
         "--retries", "3", "--extractor-retries", "3",
         "--output", str(output), url,
