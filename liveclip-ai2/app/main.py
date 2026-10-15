@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, os, re, shutil, uuid, threading, time, base64, hmac
+import json, os, re, shutil, uuid, threading, time, base64, hmac, sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import FastAPI, BackgroundTasks, File, Form, HTTPException, UploadFile
@@ -416,7 +416,47 @@ def _watchlist_loop():
 
 
 
-_oauth_states = {}
+
+def _oauth_db():
+    DATA.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DATA / "oauth_states.sqlite", timeout=10)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS oauth_states (
+            state TEXT PRIMARY KEY,
+            platform TEXT NOT NULL,
+            redirect_uri TEXT NOT NULL,
+            expires_at REAL NOT NULL
+        )
+    """)
+    return conn
+
+
+def _save_oauth_state(state, platform, redirect_uri):
+    conn = _oauth_db()
+    conn.execute(
+        "INSERT OR REPLACE INTO oauth_states VALUES (?, ?, ?, ?)",
+        (state, platform, redirect_uri, time.time() + 600)
+    )
+    conn.commit()
+    conn.close()
+
+
+def _consume_oauth_state(state, platform):
+    conn = _oauth_db()
+    row = conn.execute(
+        "SELECT redirect_uri, expires_at FROM oauth_states "
+        "WHERE state=? AND platform=?",
+        (state, platform)
+    ).fetchone()
+    conn.execute("DELETE FROM oauth_states WHERE state=?", (state,))
+    conn.commit()
+    conn.close()
+
+    if not row or row[1] < time.time():
+        return None
+
+    return {"redirect_uri": row[0]}
+
 
 @app.get('/oauth/youtube/start')
 def youtube_oauth_start():
@@ -429,17 +469,32 @@ def youtube_oauth_start():
     redirect=os.getenv('PUBLIC_BASE_URL','http://localhost:8000').rstrip('/')+'/oauth/youtube/callback'
     flow=Flow.from_client_secrets_file(str(path),scopes=['https://www.googleapis.com/auth/youtube.upload'],redirect_uri=redirect)
     url,state=flow.authorization_url(access_type='offline',include_granted_scopes='true',prompt='consent')
-    _oauth_states[state]={'platform':'youtube','flow':flow}
+    _save_oauth_state(state, 'youtube', redirect)
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url)
 
 @app.get('/oauth/youtube/callback')
 def youtube_oauth_callback(code: str, state: str):
-    item=_oauth_states.pop(state,None)
-    if not item or item.get('platform')!='youtube': raise HTTPException(400,'OAuth state expired. Please try connecting again.')
+    
+item = _consume_oauth_state(state, 'youtube')
+if not item:
+    raise HTTPException(400, 'OAuth state expired. Please try connecting again.')
+
+secrets = os.getenv('YOUTUBE_CLIENT_SECRETS_FILE', '').strip()
+path = Path(secrets)
+if not path.is_absolute():
+    path = ROOT / path
+
+redirect = item['redirect_uri']
+flow = Flow.from_client_secrets_file(
+    str(path),
+    scopes=['https://www.googleapis.com/auth/youtube.upload'],
+    redirect_uri=redirect
+)
+
     try:
-        item['flow'].fetch_token(code=code)
-        creds=item['flow'].credentials
+        flow.fetch_token(code=code)
+creds = flow.credentials
         path=ROOT/'data'/'youtube-token.json'; path.parent.mkdir(parents=True,exist_ok=True)
         path.write_text(json.dumps({'credentials':json.loads(creds.to_json())},indent=2),encoding='utf-8')
     except Exception as e: raise HTTPException(400,f'YouTube OAuth failed: {e}')
@@ -452,15 +507,16 @@ def tiktok_oauth_start():
     if not key: raise HTTPException(400,'Set TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET in .env first.')
     import secrets
     state=secrets.token_urlsafe(24); redirect=os.getenv('PUBLIC_BASE_URL','http://localhost:8000').rstrip('/')+'/oauth/tiktok/callback'
-    _oauth_states[state]={'platform':'tiktok','redirect_uri':redirect}
+    _save_oauth_state(state, 'tiktok', redirect)
     params={'client_key':key,'response_type':'code','scope':'user.info.basic,video.publish,video.upload','redirect_uri':redirect,'state':state}
     from fastapi.responses import RedirectResponse
     return RedirectResponse('https://www.tiktok.com/v2/auth/authorize/?'+urlencode(params))
 
 @app.get('/oauth/tiktok/callback')
 def tiktok_oauth_callback(code: str, state: str):
-    item=_oauth_states.pop(state,None)
-    if not item or item.get('platform')!='tiktok': raise HTTPException(400,'OAuth state expired. Please try connecting again.')
+    item = _consume_oauth_state(state, 'tiktok')
+if not item:
+    raise HTTPException(400, 'OAuth state expired. Please try connecting again.')
     try: publishing.exchange_tiktok_code(code,item['redirect_uri'])
     except Exception as e: raise HTTPException(400,f'TikTok OAuth failed: {e}')
     from fastapi.responses import RedirectResponse
